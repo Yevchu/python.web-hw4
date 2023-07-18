@@ -1,8 +1,8 @@
 from http.server import HTTPServer, BaseHTTPRequestHandler
-from threading import Thread
+from threading import Thread, Lock
 from datetime import datetime
+from urllib.parse import urlparse, unquote_plus
 import socket
-import urllib.parse
 import mimetypes
 import pathlib
 import json
@@ -12,11 +12,11 @@ UDP_IP = "127.0.0.1"
 UDP_PORT = 5000
 storage = 'storage/data.json'
 client_info = {}
-
+client_info_lock = Lock()
 
 class HttpHandler(BaseHTTPRequestHandler):
     def do_GET(self):
-        pr_url = urllib.parse.urlparse(self.path)
+        pr_url = urlparse(self.path)
         if pr_url.path == '/':
             self.send_html_file('html/index.html')
         elif pr_url.path == '/message':
@@ -29,10 +29,11 @@ class HttpHandler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         data = self.rfile.read(int(self.headers['Content-Length']))
-        data_parse = urllib.parse.unquote_plus(data.decode())
-        data_dict = {datetime.now(): {key: value for key, value in [el.split('=') for el in data_parse.split('&')]}}
-        client_info.update(data_dict)
-        print(client_info)
+        data_parse = unquote_plus(data.decode())
+        data_dict = {key: value for key, value in [el.split('=') for el in data_parse.split('&')]}
+        with client_info_lock:
+            client_info.update(data_dict)
+        send_data_to_server(client_info)
         self.send_response(302)
         self.send_header('Location', '../html/message.html')
         self.end_headers()
@@ -42,7 +43,7 @@ class HttpHandler(BaseHTTPRequestHandler):
         self.send_header('Content-type', 'text/html')
         self.end_headers()
         with open(filename, 'rb') as fd:
-            self.wfile.write(fd.read())
+            self.wfile.writel(fd.read())
 
     def send_static(self):
         self.send_response(200)
@@ -62,8 +63,8 @@ def http_server(server_class=HTTPServer, handler_class=HttpHandler):
     try:
         http.serve_forever()
     except KeyboardInterrupt:
+        print("KeyboardInterrupt received. Stopping the HTTP server.")
         http.server_close()
-
 
 def send_data_to_server(data):
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as udp_socket:
@@ -71,10 +72,14 @@ def send_data_to_server(data):
         udp_socket.sendto(bite_data, (UDP_IP, UDP_PORT))
 
 def save_data_to_json(data):
-    with open(storage, "w") as file:
-        json.dump(data, file)
+    try:
+        with open(storage, "w") as file:
+            json.dump(data, file)
+    except Exception as e:
+        print(f"An error occurred while writing to data.json: {e}")
 
 def socket_server():
+    data_dict_for_write = {}
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as udp_socket:
         udp_socket.bind((UDP_IP, UDP_PORT))
         try:
@@ -82,19 +87,17 @@ def socket_server():
                 data_bytes, _ = udp_socket.recvfrom(1024)
                 data_str = data_bytes.decode('utf-8')
                 data_dict = json.loads(data_str)
-                save_data_to_json(data_dict)
+                data_dict_for_write.update({str(datetime.now()): data_dict})
+                save_data_to_json(data_dict_for_write)
         except KeyboardInterrupt:
             print("Server stopped by the user.")
 
 if __name__ == '__main__':
     http_thread = Thread(target=http_server)
     server_thread = Thread(target=socket_server)
-    client_thread = Thread(target=send_data_to_server, args=(client_info,))
 
     http_thread.start()
     server_thread.start()
-    client_thread.start()
 
     http_thread.join()
     server_thread.join()
-    client_thread.join()
